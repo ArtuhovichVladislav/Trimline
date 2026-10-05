@@ -1,0 +1,56 @@
+# Shared by ci.yml and release.yml: selects Xcode 26, restores or builds FFmpeg, installs ffmpeg CLI.
+name: Set up Trimline build
+description: Select Xcode, restore or build the FFmpeg frameworks, install the ffmpeg CLI for test fixtures
+
+inputs:
+  xcode:
+    description: Xcode version prefix; the newest /Applications/Xcode_<prefix>*.app on the runner is used
+    default: "26"
+  ffmpeg-cli:
+    description: Install the ffmpeg command line tool (only tests use it, to generate MKV/WebM/AVI fixtures)
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode ${{ inputs.xcode }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        app="$(ls -d /Applications/Xcode_${{ inputs.xcode }}*.app 2>/dev/null | grep -v -i beta | sort -V | tail -n 1 || true)"
+        if [ -z "$app" ]; then
+          echo "::error::No Xcode ${{ inputs.xcode }} on this runner. Installed:"; ls -d /Applications/Xcode*.app; exit 1
+        fi
+        sudo xcode-select -s "$app/Contents/Developer"
+        xcodebuild -version
+        swift --version
+
+    - name: Restore FFmpeg frameworks
+      id: ffmpeg-cache
+      uses: actions/cache@v4
+      with:
+        # The frameworks plus the per-architecture install prefixes (headers and dylibs), so
+        # SKIP_COMPILE=1 ./scripts/build-ffmpeg.sh can repackage without compiling. Sources and
+        # object files (~250 MB) are not cached.
+        path: |
+          Frameworks/*.xcframework
+          .build-ffmpeg/arm64
+          .build-ffmpeg/x86_64
+        key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+    - name: Install build tools
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      run: |
+        set -euo pipefail
+        tools=()
+        if [ "${{ steps.ffmpeg-cache.outputs.cache-hit }}" != "true" ]; then tools+=(nasm pkg-config meson ninja); fi
+        if [ "${{ inputs.ffmpeg-cli }}" = "true" ]; then tools+=(ffmpeg); fi
+        if [ "${#tools[@]}" -gt 0 ]; then brew install "${tools[@]}"; fi
+
+    - name: Build FFmpeg (cache miss, ≈15 min)
+      if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: ./scripts/build-ffmpeg.sh

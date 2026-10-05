@@ -1,0 +1,77 @@
+# Tag v* (for example v1.0): ad hoc signed build (no Apple Developer account, not notarized), DMG,
+# Sparkle appcast, LGPL source bundle, GitHub release with all of them. The latest release is where the
+# app looks for updates (releases/latest/download/appcast.xml) and where the site's Download button
+# points. The only secret is the Sparkle EdDSA key; see docs/release.md.
+# Same runner assumption as ci.yml (macos-26 with Xcode 26.x).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub release and upload assets
+
+jobs:
+  release:
+    name: Build, sign for Sparkle, publish
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+        with:
+          ffmpeg-cli: "false"
+
+      - name: Fetch the previous appcast
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Latest published release; the first release starts a new feed.
+          if gh release download --pattern appcast.xml --dir "$RUNNER_TEMP/previous" 2> /dev/null; then
+            echo "APPCAST_SEED=$RUNNER_TEMP/previous/appcast.xml" >> "$GITHUB_ENV"
+          else
+            echo "No previous appcast found; starting a new one."
+          fi
+
+      - name: Build, package, sign the update
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          RELEASES_REPO: ${{ github.repository }}
+        run: ./scripts/release.sh --skip-ffmpeg --expect-version "${GITHUB_REF_NAME#v}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          assets=(dist/Trimline-"$version".dmg dist/Trimline.dmg dist/Trimline-"$version".dmg.sha256 dist/appcast.xml)
+          for f in dist/trimline-ffmpeg-source-*; do [ -e "$f" ] && assets+=("$f"); done
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" --title "Trimline $version" --generate-notes --verify-tag
+          fi
+          {
+            echo "### Trimline $version"
+            echo '```'
+            cat "dist/Trimline-$version.dmg.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs-${{ github.ref_name }}
+          path: |
+            build/release/*.log
+            build/release/size-report.txt
+          if-no-files-found: ignore

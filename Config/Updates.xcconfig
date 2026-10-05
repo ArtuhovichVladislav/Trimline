@@ -1,0 +1,4 @@
+// Sparkle update settings, substituted into Info.plist (SUFeedURL, SUPublicEDKey). See docs/release.md.
+
+TRIMLINE_UPDATE_FEED_URL = https:/$()/github.com/ArtuhovichVladislav/Trimline/releases/latest/download/appcast.xml
+TRIMLINE_SPARKLE_PUBLIC_KEY = Q+NKbBZiLUAcm0uVv/NfuUmXQfVanLRJReZHZ16R7Rw=

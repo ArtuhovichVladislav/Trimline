@@ -1,0 +1,68 @@
+# Every push and pull request: format, unit tests, Debug build (warnings are errors in the
+# project), universal Release archive with the 30 MB size budget, and the release pipeline up to
+# the DMG. The Sparkle signature and appcast are made only on tags, in release.yml.
+#
+# Runner assumption: `macos-26` (Apple silicon) has Xcode 26.x installed as
+# /Applications/Xcode_26.x.app; the setup action picks the newest one. If the label is retired or
+# Xcode 26 moves, change `runs-on` and the `xcode` input of the setup action.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - name: Format (swift-format)
+        run: |
+          status=0
+          out="$(xcrun swift-format lint --strict --recursive --parallel \
+            TrimlineCore/Sources TrimlineCore/Tests TrimlineCore/Package.swift Trimline/App Trimline/UI 2>&1)" || status=$?
+          if [ -n "$out" ] || [ "$status" -ne 0 ]; then
+            echo "$out"
+            echo "::error::swift-format found problems; run: xcrun swift-format format -i -r TrimlineCore Trimline/App Trimline/UI"
+            exit 1
+          fi
+
+      - name: Unit tests (TrimlineCore)
+        working-directory: TrimlineCore
+        run: swift test
+
+      - name: Debug build
+        run: |
+          set -o pipefail
+          xcodebuild -project Trimline.xcodeproj -scheme Trimline -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build/ci-debug build
+
+      # Archive is what ships (stripped, universal), so the size check runs on it. release.sh
+      # also verifies hardened runtime on every binary and builds the DMG.
+      - name: Release archive, size budget, DMG
+        run: ./scripts/release.sh --skip-ffmpeg --skip-sparkle --skip-source
+
+      - name: Upload test DMG
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trimline-${{ github.sha }}
+          path: |
+            dist/*.dmg
+            build/release/size-report.txt
+          retention-days: 7
+          if-no-files-found: error
